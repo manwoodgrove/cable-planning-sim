@@ -84,14 +84,13 @@ export async function bakeConduitsToIfc(
   sceneToIfc: (p: THREE.Vector3) => [number, number, number] = defaultSceneToIfc,
 ): Promise<Uint8Array> {
   const api = new WebIFC.IfcAPI();
-  api.SetWasmPath("https://unpkg.com/web-ifc@0.0.77/", true);
+  api.SetWasmPath("/wasm/", true);
   await api.Init();
 
   const modelID = api.OpenModel(shellIfc);
   const { contextID, storeyID, ownerHistoryID } = findAnchors(api, modelID);
 
   let nextId = api.GetMaxExpressID(modelID) + 1;
-  const id = () => nextId++;
   const ref = (expressID: number) => new WebIFC.Handle(expressID);
   const owner = ownerHistoryID ? ref(ownerHistoryID) : null;
 
@@ -105,7 +104,10 @@ export async function bakeConduitsToIfc(
   const text = (v: string) => new IFC.IfcText(v);
   const guid = () => new IFC.IfcGloballyUniqueId(ifcGuid());
 
-  const write = (entity: any) => {
+  // Constructors take ONLY the IFC attributes — the express ID is a separate
+  // property. Passing it as the first argument shifts every attribute by one.
+  const write = (entity: any): number => {
+    entity.expressID = nextId++;
     api.WriteLine(modelID, entity);
     return entity.expressID as number;
   };
@@ -116,19 +118,14 @@ export async function bakeConduitsToIfc(
     // 1. Directrix: cartesian points → polyline (in IFC coordinates).
     const pointRefs = conduit.points.map((p) => {
       const [x, y, z] = sceneToIfc(p);
-      const pid = id();
-      write(new IFC.IfcCartesianPoint(pid, [len(x), len(y), len(z)]));
-      return ref(pid);
+      return ref(write(new IFC.IfcCartesianPoint([len(x), len(y), len(z)])));
     });
-    const polylineID = id();
-    write(new IFC.IfcPolyline(polylineID, pointRefs));
+    const polylineID = write(new IFC.IfcPolyline(pointRefs));
 
     // 2. Swept disk solid = circular section swept along the directrix.
     //    (Directrix, Radius, InnerRadius, StartParam, EndParam)
-    const solidID = id();
-    write(
+    const solidID = write(
       new IFC.IfcSweptDiskSolid(
-        solidID,
         ref(polylineID),
         plen(conduit.outerRadius_m),
         null,
@@ -138,34 +135,26 @@ export async function bakeConduitsToIfc(
     );
 
     // 3. Shape representation + product definition shape.
-    const shapeRepID = id();
-    write(
+    const shapeRepID = write(
       new IFC.IfcShapeRepresentation(
-        shapeRepID,
         ref(contextID),
         label("Body"),
         label("AdvancedSweptSolid"),
         [ref(solidID)],
       ),
     );
-    const productShapeID = id();
-    write(
-      new IFC.IfcProductDefinitionShape(productShapeID, null, null, [ref(shapeRepID)]),
+    const productShapeID = write(
+      new IFC.IfcProductDefinitionShape(null, null, [ref(shapeRepID)]),
     );
 
     // 4. Placement at the origin (points are already absolute in IFC space).
-    const originID = id();
-    write(new IFC.IfcCartesianPoint(originID, [len(0), len(0), len(0)]));
-    const axisID = id();
-    write(new IFC.IfcAxis2Placement3D(axisID, ref(originID), null, null));
-    const placementID = id();
-    write(new IFC.IfcLocalPlacement(placementID, null, ref(axisID)));
+    const originID = write(new IFC.IfcCartesianPoint([len(0), len(0), len(0)]));
+    const axisID = write(new IFC.IfcAxis2Placement3D(ref(originID), null, null));
+    const placementID = write(new IFC.IfcLocalPlacement(null, ref(axisID)));
 
     // 5. The element itself.
-    const segmentID = id();
-    write(
+    const segmentID = write(
       new IFC.IfcCableCarrierSegment(
-        segmentID,
         guid(),
         owner,
         label(conduit.name),
@@ -181,9 +170,7 @@ export async function bakeConduitsToIfc(
     // 6. Cable schedule as a property set on the segment.
     const props: WebIFC.Handle<any>[] = [];
     const addProp = (name: string, value: any) => {
-      const pid = id();
-      write(new IFC.IfcPropertySingleValue(pid, ident(name), null, value, null));
-      props.push(ref(pid));
+      props.push(ref(write(new IFC.IfcPropertySingleValue(ident(name), null, value, null))));
     };
     addProp("Length_m", new IFC.IfcReal(Number(conduitLength(conduit).toFixed(3))));
     addProp("Diameter", label(conduit.diameter));
@@ -192,10 +179,8 @@ export async function bakeConduitsToIfc(
       addProp(`Cable_${n}`, label(`${c.type} ${c.n_conductors}G${c.area_mm2}`));
       if (c.note) addProp(`Cable_${n}_note`, label(c.note));
     });
-    const psetID = id();
-    write(
+    const psetID = write(
       new IFC.IfcPropertySet(
-        psetID,
         guid(),
         owner,
         label("ConduitCables"),
@@ -205,7 +190,6 @@ export async function bakeConduitsToIfc(
     );
     write(
       new IFC.IfcRelDefinesByProperties(
-        id(),
         guid(),
         owner,
         null,
@@ -218,7 +202,6 @@ export async function bakeConduitsToIfc(
     // 7. Contain the segment in the storey.
     write(
       new IFC.IfcRelContainedInSpatialStructure(
-        id(),
         guid(),
         owner,
         null,
