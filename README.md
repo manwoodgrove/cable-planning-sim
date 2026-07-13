@@ -1,4 +1,4 @@
-# TowerSpotting Twin — apartment electrical planner
+# Apartment electrical planner
 
 A browser BIM tool for planning conduit/cable runs in an apartment. The 3D
 engine is **That Open Engine** end to end; conduits are authored as genuine
