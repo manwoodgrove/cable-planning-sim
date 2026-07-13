@@ -15,10 +15,12 @@ npm run dev
 Then: **Load apartment IFC** → **Start drawing** (click points along a run) →
 **Finish conduit** → select it and **Add cable(s)** → **Bake → IFC**.
 
-You need an apartment shell as `.ifc` first. Model it once in **FreeCAD** (BIM
-workbench → export IFC — you already have FreeCAD set up) or **Bonsai**
-(ex-BlenderBIM). Walls/slabs/spaces as `IfcWall`/`IfcSlab`/`IfcSpace`, and at
-least one `IfcBuildingStorey` (the bake needs a storey to contain conduits).
+Try it immediately with `examples/sample-apartment.ifc` (a small two-room
+shell generated with IfcOpenShell). For the real thing you need your apartment
+shell as `.ifc`: model it once in **FreeCAD** (BIM workbench → export IFC) or
+**Bonsai** (ex-BlenderBIM). Walls/slabs/spaces as `IfcWall`/`IfcSlab`/`IfcSpace`,
+and at least one `IfcBuildingStorey` (the bake needs a storey to contain
+conduits).
 
 ## What's thatOpen, and why it's shaped this way
 
@@ -45,16 +47,29 @@ along a path. The bake **injects into the loaded shell IFC** so it reuses the
 existing project, units, representation context and storey, instead of
 hand-authoring a valid IFC from nothing.
 
-## Version knobs (the two things most likely to bite)
+## Version and integration notes
 
-- **web-ifc WASM path.** Pinned to `web-ifc@0.0.77` in `Viewer.tsx` (`WASM`) and
-  `authorConduit.ts`. Keep both in sync with the `web-ifc` version npm actually
-  installs, or the loader/bake will 404 the WASM.
+- **No CDN at runtime.** The web-ifc WASM is copied out of `node_modules` into
+  `/wasm/` by `vite.config.ts` (so it always matches the installed `web-ifc`),
+  and the Fragments worker is imported from the package with Vite's `?url`.
+  The app works offline.
+- **No COOP/COEP headers on purpose.** Cross-origin isolation makes web-ifc
+  pick its multithreaded WASM build, whose pthread workers can't locate their
+  own script under a bundler (`new Worker("undefined")`). Single-threaded is
+  plenty for apartment-sized models.
+- **Raycasting the shell** goes through each Fragments model's own async
+  `model.raycast({camera, mouse, dom})` — three.js's `Raycaster` cannot
+  traverse Fragments meshes (their buffer attributes live in the worker).
 - **IFC schema + coordinate transform** (`authorConduit.ts`): `S = "IFC4X3"` —
-  switch to `"IFC4"` if your shell is IFC4. `defaultSceneToIfc` assumes scene
-  Y-up → IFC Z-up; if baked conduits land rotated/offset vs. the walls, derive
-  the transform from the loaded model's coordination matrix instead. The
-  `LengthMeasurement` wiring is also version-sensitive (3 lines, flagged in code).
+  switch to `"IFC4"` if your shell is IFC4 (the typed wrappers used here are
+  layout-identical in both). `defaultSceneToIfc` assumes scene Y-up → IFC Z-up;
+  if baked conduits land rotated/offset vs. the walls, derive the transform
+  from the loaded model's coordination matrix instead. The `LengthMeasurement`
+  wiring is also version-sensitive (3 lines, flagged in code).
+- **web-ifc write API**: entity constructors take ONLY the IFC attributes; the
+  express ID is assigned as a property afterwards (`entity.expressID = n`).
+  Passing the ID as the first constructor argument silently shifts every
+  attribute by one and produces corrupt (but parseable-looking) IFC.
 
 ## The robust authoring alternative (recommended once you're past the prototype)
 
