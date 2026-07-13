@@ -11,8 +11,14 @@ import {
   uid,
 } from "./conduits/model";
 import { bakeConduitsToIfc } from "./conduits/authorConduit";
+// The fragments worker ships inside the package — import it as a URL instead
+// of letting FragmentsManager.getWorker() fetch it from unpkg.
+// @ts-ignore Vite's ?url import has no type declaration
+import fragmentsWorkerUrl from "@thatopen/fragments/worker?url";
 
-const WASM = "https://unpkg.com/web-ifc@0.0.77/";
+// Served from our own origin (copied out of node_modules by vite.config.ts),
+// so the app needs no CDN and the WASM always matches the installed web-ifc.
+const WASM = "/wasm/";
 
 export function Viewer() {
   const containerRef = useRef<HTMLDivElement>(null);
@@ -54,8 +60,12 @@ export function Viewer() {
     const container = containerRef.current!;
     let disposed = false;
 
+    // Created synchronously so the cleanup below can always dispose it — with
+    // an async-only handle, React StrictMode's mount→unmount→remount leaves
+    // the first world alive and its dead canvas stacked over the live one.
+    const components = new OBC.Components();
+
     (async () => {
-      const components = new OBC.Components();
       const worlds = components.get(OBC.Worlds);
       const world = worlds.create<
         OBC.SimpleScene,
@@ -65,11 +75,14 @@ export function Viewer() {
 
       world.scene = new OBC.SimpleScene(components);
       world.scene.setup();
-      world.scene.three.background = null;
+      // Dark backdrop — the IFC shell renders as white/light Lambert meshes,
+      // which are invisible over the page's white body on a null background.
+      world.scene.three.background = new THREE.Color(0x252b33);
 
       world.renderer = new OBC.SimpleRenderer(components, container);
       world.camera = new OBC.OrthoPerspectiveCamera(components);
       await world.camera.controls.setLookAt(12, 10, 12, 0, 0, 0);
+      if (disposed) return; // cleanup already disposed `components` mid-setup
 
       components.init();
       components.get(OBC.Grids).create(world);
@@ -88,10 +101,10 @@ export function Viewer() {
       // IFC loader → Fragments pipeline (per thatOpen's current IfcLoader tutorial).
       const ifcLoader = components.get(OBC.IfcLoader);
       await ifcLoader.setup({ autoSetWasm: false, wasm: { path: WASM, absolute: true } });
+      if (disposed) return;
 
-      const workerUrl = await OBC.FragmentsManager.getWorker();
       const fragments = components.get(OBC.FragmentsManager);
-      fragments.init(workerUrl);
+      fragments.init(fragmentsWorkerUrl);
       world.camera.controls.addEventListener("update", () => fragments.core.update());
       fragments.list.onItemSet.add(({ value: model }: any) => {
         model.useCamera(world.camera.three);
@@ -114,12 +127,12 @@ export function Viewer() {
       Object.assign(refs.current, {
         components, world, fragments, ifcLoader, dims, ground, previewGroup,
       });
-      if (!disposed) setReady(true);
+      setReady(true);
     })();
 
     return () => {
       disposed = true;
-      refs.current.components?.dispose();
+      components.dispose();
     };
   }, []);
 
@@ -136,8 +149,8 @@ export function Viewer() {
       );
     };
 
-    const pick = (): THREE.Vector3 | { conduitId: string } | null => {
-      const { world, raycaster, pointer, ground, previewGroup } = refs.current;
+    const pick = async (e: PointerEvent): Promise<THREE.Vector3 | { conduitId: string } | null> => {
+      const { world, fragments, raycaster, pointer, ground, previewGroup } = refs.current;
       if (!world) return null;
       raycaster.setFromCamera(pointer, world.camera.three);
 
@@ -147,23 +160,41 @@ export function Viewer() {
         const withId = hitsC.find((h) => (h.object as any).userData?.conduitId);
         if (withId) return { conduitId: (withId.object as any).userData.conduitId };
       }
-      // Otherwise a 3D point: shell geometry, else the ground plane.
-      const targets = world.scene.three.children.filter(
-        (c: THREE.Object3D) => c !== previewGroup,
-      );
-      const hits = raycaster.intersectObjects(targets, true);
-      const hit = hits.find((h) => h.object !== ground) ?? hits.find((h) => h.object === ground);
-      return hit ? hit.point.clone() : null;
+      // Shell geometry: Fragments meshes can't be traversed by three's
+      // raycaster — each model exposes its own async raycast (client px coords).
+      let best: { point: THREE.Vector3; distance: number } | null = null;
+      if (fragments?.initialized) {
+        const mouse = new THREE.Vector2(e.clientX, e.clientY);
+        const dom = world.renderer.three.domElement as HTMLCanvasElement;
+        for (const model of fragments.list.values()) {
+          try {
+            const hit = await model.raycast({ camera: world.camera.three, mouse, dom });
+            if (hit && (!best || hit.distance < best.distance)) {
+              best = { point: hit.point.clone(), distance: hit.distance };
+            }
+          } catch {
+            // model still converting — ignore
+          }
+        }
+      }
+      // Ground plane fallback (plain three mesh).
+      if (ground) {
+        const g = raycaster.intersectObject(ground, false)[0];
+        if (g && (!best || g.distance < best.distance)) {
+          best = { point: g.point.clone(), distance: g.distance };
+        }
+      }
+      return best ? best.point : null;
     };
 
     const onDown = (e: PointerEvent) => (downAt = { x: e.clientX, y: e.clientY });
-    const onUp = (e: PointerEvent) => {
+    const onUp = async (e: PointerEvent) => {
       if (!downAt) return;
       const moved = Math.hypot(e.clientX - downAt.x, e.clientY - downAt.y);
       downAt = null;
       if (moved > 4) return; // it was a camera drag, not a click
       ndc(e);
-      const result = pick();
+      const result = await pick(e);
       if (!result) return;
 
       if (!drawModeRef.current) {
@@ -282,7 +313,7 @@ export function Viewer() {
     setStatus("Baking conduits into IFC…");
     try {
       const out = await bakeConduitsToIfc(refs.current.rawIfc, conduits);
-      download(new Blob([out]), "apartment-with-conduits.ifc");
+      download(new Blob([new Uint8Array(out)]), "apartment-with-conduits.ifc");
       setStatus("Exported IFC with IfcCableCarrierSegments.");
     } catch (e: any) {
       console.error(e);
