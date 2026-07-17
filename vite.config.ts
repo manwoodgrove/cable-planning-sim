@@ -7,6 +7,9 @@ import { viteStaticCopy } from "vite-plugin-static-copy";
 // their own script when bundled (new Worker("undefined")). The single-threaded
 // build handles apartment-sized IFCs fine.
 export default defineConfig({
+  // ponytail: bind 0.0.0.0 so WSL2's IPv4 localhost-forward reaches the server.
+  // Vite's default binds ::1 (IPv6) only, which Windows localhost:5173 can't hit.
+  server: { host: true },
   plugins: [
     react(),
     // Serve the web-ifc WASM from our own origin instead of unpkg — works
